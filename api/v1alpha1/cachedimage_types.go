@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	crv1 "github.com/google/go-containerregistry/pkg/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -10,9 +11,10 @@ var RepositoryLabelName = "kuik.enix.io/repository"
 type CachedImageSpec struct {
 	SourceImage string `json:"sourceImage"`
 	// +optional
-	ExpiresAt            *metav1.Time `json:"expiresAt,omitempty"`
-	PullSecretNames      []string     `json:"pullSecretNames,omitempty"`
-	PullSecretsNamespace string       `json:"pullSecretsNamespace,omitempty"`
+	ExpiresAt            *metav1.Time   `json:"expiresAt,omitempty"`
+	PullSecretNames      []string       `json:"pullSecretNames,omitempty"`
+	PullSecretsNamespace string         `json:"pullSecretsNamespace,omitempty"`
+	Platform             *crv1.Platform `json:"platform,omitempty"`
 }
 
 type PodReference struct {
@@ -39,6 +41,7 @@ type CachedImageStatus struct {
 //+kubebuilder:printcolumn:name="Expires at",type="string",JSONPath=".spec.expiresAt"
 //+kubebuilder:printcolumn:name="Pods count",type="integer",JSONPath=".status.usedBy.count"
 //+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+//+kubebuilder:printcolumn:name="Arch",type="string",JSONPath=".spec.platform.architecture"
 
 // CachedImage is the Schema for the cachedimages API
 type CachedImage struct {

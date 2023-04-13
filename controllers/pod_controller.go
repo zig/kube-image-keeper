@@ -15,6 +15,7 @@ import (
 	"github.com/enix/kube-image-keeper/api/v1alpha1"
 	kuikenixiov1alpha1 "github.com/enix/kube-image-keeper/api/v1alpha1"
 	"github.com/enix/kube-image-keeper/internal/registry"
+	crv1 "github.com/google/go-containerregistry/pkg/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,7 +43,8 @@ type PodReconciler struct {
 	ExpiryDelay time.Duration
 }
 
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=core,resources=pods/finalizers,verbs=update
 
@@ -64,8 +66,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	cachedImages := desiredCachedImages(ctx, &pod)
-
 	finalizerName := "pod.kuik.enix.io/finalizer"
 
 	// On pod deletion
@@ -74,11 +74,30 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			return ctrl.Result{}, nil
 		}
 
+		// TODO use an indexer ?
+		var cachedImages kuikenixiov1alpha1.CachedImageList
+		if err := r.List(ctx, &cachedImages); err != nil {
+			log.Info("failed to list cached images")
+			return ctrl.Result{}, err
+		}
+
 		log.Info("pod is deleting")
-		for _, cachedImage := range cachedImages {
+		for _, cachedImage := range cachedImages.Items {
+			owned := false
+			for _, p := range cachedImage.Status.UsedBy.Pods {
+				if p.NamespacedName == pod.Namespace+"/"+pod.Name {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				continue
+			}
+
 			// Check if this CachedImage is in use by other pods
 			var podsList corev1.PodList
 			if err := r.List(ctx, &podsList, client.MatchingFields{cachedImageOwnerKey: cachedImage.Name}); err != nil {
+				log.Info("failed to list pods used by cachedImage")
 				return ctrl.Result{}, err
 			}
 			cachedImageInUse := false
@@ -104,6 +123,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				if apierrors.IsNotFound(err) {
 					continue
 				} else {
+					log.Info("failed to get cachedImage object key")
 					return ctrl.Result{}, err
 				}
 			}
@@ -123,6 +143,19 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		log.Info("reconciled deleting pod")
 		return ctrl.Result{}, nil
 	}
+
+	if pod.Spec.NodeName == "" {
+		log.Info("pod is not assigned to a node yet")
+		return ctrl.Result{}, nil
+	}
+
+	var node corev1.Node
+	if err := r.Get(ctx, client.ObjectKey{Name: pod.Spec.NodeName}, &node); err != nil {
+		log.Info("failed to find node", "pod", pod.Name, "node", pod.Spec.NodeName)
+		return ctrl.Result{}, err
+	}
+
+	cachedImages := desiredCachedImages(ctx, &pod, &node)
 
 	// Add finalizer to keep the Pod during expiring of CachedImages
 	if !containsString(pod.GetFinalizers(), finalizerName) {
@@ -255,15 +288,24 @@ func (r *PodReconciler) updatePodCount(ctx context.Context, cachedImage *kuikeni
 	return nil
 }
 
-func desiredCachedImages(ctx context.Context, pod *corev1.Pod) []kuikenixiov1alpha1.CachedImage {
+func desiredCachedImages(ctx context.Context, pod *corev1.Pod, node *corev1.Node) []kuikenixiov1alpha1.CachedImage {
+	var platform *crv1.Platform
+
+	if node != nil && node.Labels != nil {
+		platform = &crv1.Platform{
+			Architecture: node.Labels["kubernetes.io/arch"],
+			OS:           node.Labels["kubernetes.io/os"],
+		}
+	}
+
 	pullSecretNames := []string{}
 
 	for _, pullSecret := range pod.Spec.ImagePullSecrets {
 		pullSecretNames = append(pullSecretNames, pullSecret.Name)
 	}
 
-	cachedImages := desiredCachedImagesForContainers(ctx, pod.Spec.Containers, pod.Annotations, AnnotationOriginalImageTemplate)
-	cachedImages = append(cachedImages, desiredCachedImagesForContainers(ctx, pod.Spec.InitContainers, pod.Annotations, AnnotationOriginalInitImageTemplate)...)
+	cachedImages := desiredCachedImagesForContainers(ctx, pod.Spec.Containers, pod.Annotations, AnnotationOriginalImageTemplate, platform)
+	cachedImages = append(cachedImages, desiredCachedImagesForContainers(ctx, pod.Spec.InitContainers, pod.Annotations, AnnotationOriginalInitImageTemplate, platform)...)
 
 	for i := range cachedImages {
 		cachedImages[i].Spec.PullSecretNames = pullSecretNames
@@ -273,7 +315,8 @@ func desiredCachedImages(ctx context.Context, pod *corev1.Pod) []kuikenixiov1alp
 	return cachedImages
 }
 
-func desiredCachedImagesForContainers(ctx context.Context, containers []corev1.Container, annotations map[string]string, annotationKeyTemplate string) []kuikenixiov1alpha1.CachedImage {
+func desiredCachedImagesForContainers(ctx context.Context, containers []corev1.Container,
+	annotations map[string]string, annotationKeyTemplate string, platform *crv1.Platform) []kuikenixiov1alpha1.CachedImage {
 	log := log.FromContext(ctx)
 	cachedImages := []kuikenixiov1alpha1.CachedImage{}
 
@@ -287,7 +330,7 @@ func desiredCachedImagesForContainers(ctx context.Context, containers []corev1.C
 			continue
 		}
 
-		cachedImage, err := cachedImageFromSourceImage(sourceImage)
+		cachedImage, err := cachedImageFromSourceImage(sourceImage, platform)
 		if err != nil {
 			containerLog.Error(err, "could not create cached image, ignoring")
 			continue
@@ -300,7 +343,7 @@ func desiredCachedImagesForContainers(ctx context.Context, containers []corev1.C
 	return cachedImages
 }
 
-func cachedImageFromSourceImage(sourceImage string) (*kuikenixiov1alpha1.CachedImage, error) {
+func cachedImageFromSourceImage(sourceImage string, platform *crv1.Platform) (*kuikenixiov1alpha1.CachedImage, error) {
 	ref, err := reference.ParseAnyReference(sourceImage)
 	if err != nil {
 		return nil, err
@@ -325,6 +368,7 @@ func cachedImageFromSourceImage(sourceImage string) (*kuikenixiov1alpha1.CachedI
 		},
 		Spec: kuikenixiov1alpha1.CachedImageSpec{
 			SourceImage: sourceImage,
+			Platform:    platform,
 		},
 	}
 

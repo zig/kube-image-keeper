@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -93,7 +92,7 @@ func DeleteImage(imageName string) error {
 	return remote.Delete(digest)
 }
 
-func CacheImage(imageName string, keychain authn.Keychain) error {
+func CacheImage(imageName string, options ...remote.Option) error {
 	destRef, err := parseLocalReference(imageName)
 	if err != nil {
 		return err
@@ -103,8 +102,7 @@ func CacheImage(imageName string, keychain authn.Keychain) error {
 		return err
 	}
 
-	auth := remote.WithAuthFromKeychain(keychain)
-	image, err := remote.Image(sourceRef, auth)
+	image, err := remote.Image(sourceRef, options...)
 	if err != nil {
 		if errIsImageNotFound(err) {
 

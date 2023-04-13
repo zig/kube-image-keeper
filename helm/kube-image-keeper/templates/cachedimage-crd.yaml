@@ -27,6 +27,9 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .spec.platform.architecture
+      name: Arch
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -58,6 +61,29 @@ spec:
                 type: string
               sourceImage:
                 type: string
+              platform:
+                description: Platform represents the target os/arch for an image.
+                properties:
+                  architecture:
+                    type: string
+                  features:
+                    items:
+                      type: string
+                    type: array
+                  os:
+                    type: string
+                  os.features:
+                    items:
+                      type: string
+                    type: array
+                  os.version:
+                    type: string
+                  variant:
+                    type: string
+                required:
+                - architecture
+                - os
+                type: object
             required:
             - sourceImage
             type: object

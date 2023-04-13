@@ -9,6 +9,7 @@ import (
 	"github.com/enix/kube-image-keeper/api/v1alpha1"
 	kuikenixiov1alpha1 "github.com/enix/kube-image-keeper/api/v1alpha1"
 	"github.com/enix/kube-image-keeper/internal/registry"
+	crv1 "github.com/google/go-containerregistry/pkg/v1"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -36,12 +37,13 @@ var podStub = corev1.Pod{
 			{Name: "b", Image: "nginx:1.22"},
 			{Name: "c", Image: "busybox:1.35"},
 		},
+		NodeName: "test-node",
 	},
 }
 
 var podStubNotRewritten = corev1.Pod{
 	ObjectMeta: metav1.ObjectMeta{
-		Name:      "test-pod",
+		Name:      "test-pod2",
 		Namespace: "default",
 	},
 	Spec: corev1.PodSpec{
@@ -51,6 +53,22 @@ var podStubNotRewritten = corev1.Pod{
 		Containers: []corev1.Container{
 			{Name: "b", Image: "nginx"},
 			{Name: "c", Image: "busybox"},
+		},
+		NodeName: "test-node",
+	},
+}
+
+var platform = &crv1.Platform{
+	Architecture: "amd64",
+	OS:           "linux",
+}
+
+var nodeStub = corev1.Node{
+	ObjectMeta: metav1.ObjectMeta{
+		Name: "test-node",
+		Labels: map[string]string{
+			"kubernetes.io/arch": platform.Architecture,
+			"kubernetes.io/os":   platform.OS,
 		},
 	},
 }
@@ -81,7 +99,8 @@ func TestDesiredCachedImages(t *testing.T) {
 	g := NewWithT(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cachedImages := desiredCachedImages(context.Background(), &tt.pod)
+			node := nodeStub.DeepCopy()
+			cachedImages := desiredCachedImages(context.Background(), &tt.pod, node)
 			g.Expect(cachedImages).To(HaveLen(len(tt.cachedImages)))
 			for i, cachedImage := range cachedImages {
 				g.Expect(cachedImage.Spec.SourceImage).To(Equal(tt.cachedImages[i].Spec.SourceImage))
@@ -128,7 +147,7 @@ func Test_cachedImageFromSourceImage(t *testing.T) {
 	g := NewWithT(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cachedImage, err := cachedImageFromSourceImage(tt.sourceImage)
+			cachedImage, err := cachedImageFromSourceImage(tt.sourceImage, platform)
 			g.Expect(err).ToNot(HaveOccurred())
 
 			g.Expect(cachedImage.Name).To(Equal(tt.expectedName))
@@ -150,6 +169,8 @@ var _ = Describe("Pod Controller", func() {
 
 	BeforeEach(func() {
 		// Add any setup steps that needs to be executed before each test
+		node := nodeStub.DeepCopy()
+		Expect(k8sClient.Create(context.Background(), node)).Should(Succeed())
 	})
 
 	AfterEach(func() {
@@ -159,6 +180,8 @@ var _ = Describe("Pod Controller", func() {
 
 		By("Deleting all cached images")
 		Expect(k8sClient.DeleteAllOf(context.Background(), &kuikenixiov1alpha1.CachedImage{})).Should(Succeed())
+
+		Expect(k8sClient.Delete(context.Background(), &nodeStub)).Should(suceedOrNotFound)
 	})
 
 	Context("Pod with containers and init containers", func() {
@@ -195,6 +218,8 @@ var _ = Describe("Pod Controller", func() {
 				}
 				return expiringCachedImages
 			}, timeout, interval).Should(HaveLen(len(podStub.Spec.Containers) + len(podStub.Spec.InitContainers)))
+
+			Expect(fetched.Items[0].Spec.Platform).To(BeEquivalentTo(platform))
 		})
 		It("Should not create CachedImages", func() {
 			By("Creating a pod without rewriting images")

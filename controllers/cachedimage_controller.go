@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -116,7 +117,12 @@ func (r *CachedImageReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if !isCached {
 		r.Recorder.Eventf(&cachedImage, "Normal", "Caching", "Start caching image %s", cachedImage.Spec.SourceImage)
 		keychain := registry.NewKubernetesKeychain(r.Client, cachedImage.Spec.PullSecretsNamespace, cachedImage.Spec.PullSecretNames)
-		if err := registry.CacheImage(cachedImage.Spec.SourceImage, keychain); err != nil {
+		options := make([]remote.Option, 0)
+		options = append(options, remote.WithAuthFromKeychain(keychain))
+		if cachedImage.Spec.Platform != nil {
+			options = append(options, remote.WithPlatform(*cachedImage.Spec.Platform))
+		}
+		if err := registry.CacheImage(cachedImage.Spec.SourceImage, options...); err != nil {
 			log.Error(err, "failed to cache image")
 			r.Recorder.Eventf(&cachedImage, "Warning", "CacheFailed", "Failed to cache image %s, reason: %s", cachedImage.Spec.SourceImage, err)
 			return ctrl.Result{}, err
@@ -159,7 +165,8 @@ func (r *CachedImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			WithValues("pod", klog.KObj(pod))
 		ctx := logr.NewContext(context.Background(), logger)
 
-		cachedImages := desiredCachedImages(ctx, pod)
+		// we don't care of the node here, since we're just listing names, which don't depend on the node
+		cachedImages := desiredCachedImages(ctx, pod, nil)
 
 		cachedImageNames := make([]string, len(cachedImages))
 		for _, cachedImage := range cachedImages {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
@@ -318,7 +319,7 @@ func Test_CacheImage(t *testing.T) {
 
 			Endpoint = cacheRegistry.Addr()
 			keychain := NewKubernetesKeychain(nil, "default", []string{})
-			err := CacheImage(originRegistry.Addr()+"/"+tt.image, keychain)
+			err := CacheImage(originRegistry.Addr()+"/"+tt.image, remote.WithAuthFromKeychain(keychain))
 			if tt.wantErr != "" {
 				g.Expect(err).To(BeAssignableToTypeOf(tt.errType))
 				g.Expect(err).To(MatchError(ContainSubstring(tt.wantErr)))
